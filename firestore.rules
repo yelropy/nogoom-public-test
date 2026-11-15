@@ -1,0 +1,90 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signed() { return request.auth != null; }
+    function owner(fid) { return signed() && request.auth.uid == fid; }
+    function member(fid) {
+      return signed() && exists(/databases/$(database)/documents/families/$(fid)/members/$(request.auth.uid));
+    }
+    function parent(fid) {
+      return member(fid) && get(/databases/$(database)/documents/families/$(fid)/members/$(request.auth.uid)).data.role in ['father', 'mother'];
+    }
+    match /users/{uid} {
+      allow get: if signed() && request.auth.uid == uid;
+      allow list: if false;
+      // Only the first owner can create their own mapping, at the same time as the family document.
+      allow create: if owner(uid) && request.resource.data.keys().hasOnly(['familyId','role','createdAt'])
+        && request.resource.data.familyId == uid && request.resource.data.role == 'father'
+        && getAfter(/databases/$(database)/documents/families/$(uid)).data.ownerId == uid;
+      allow update,delete: if false;
+    }
+    match /families/{fid} {
+      allow create: if owner(fid)
+        && request.resource.data.keys().hasAll(['ownerId','country','currency','pointValue'])
+        && request.resource.data.ownerId == request.auth.uid;
+      allow get: if member(fid);
+      allow list: if false;
+      allow update: if parent(fid)
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.keys().hasOnly([
+          'ownerId','createdAt','updatedAt','name','fatherName','motherName','country','city',
+          'currency','currencyManual','pointValue','monthlyCap','prayerMethod','prayerWindow','prayerReminder'
+        ])
+        && request.resource.data.pointValue is number && request.resource.data.pointValue > 0
+        && request.resource.data.monthlyCap is number && request.resource.data.monthlyCap >= 0;
+      allow delete: if false;
+      match /members/{uid} {
+        allow get: if member(fid);
+        allow list: if member(fid);
+        allow create: if owner(fid) && uid == request.auth.uid
+          && request.resource.data.role == 'father'
+          && request.resource.data.uid == request.auth.uid;
+        allow update,delete: if false;
+        match /tokens/{tokenId} {
+          allow get,list: if signed() && request.auth.uid == uid && member(fid);
+          allow create,update: if signed() && request.auth.uid == uid && member(fid)
+            && request.resource.data.keys().hasOnly(['token','enabled','createdAt'])
+            && request.resource.data.token is string
+            && request.resource.data.token.size() < 4096
+            && request.resource.data.enabled is bool;
+          allow delete: if signed() && request.auth.uid == uid && member(fid);
+        }
+      }
+      match /children/{childId} {
+        allow read: if member(fid);
+        allow create,update: if parent(fid)
+          && request.resource.data.keys().hasOnly(['name','age','color','photo','createdAt','updatedAt'])
+          && request.resource.data.name is string && request.resource.data.name.size() <= 60
+          && request.resource.data.age is number && request.resource.data.age >= 1 && request.resource.data.age <= 20
+          && (!('photo' in request.resource.data) || (request.resource.data.photo is string && request.resource.data.photo.size() < 100000));
+        allow delete: if parent(fid);
+      }
+      match /tasks/{taskId} {
+        allow read: if member(fid);
+        allow create,update: if parent(fid)
+          && request.resource.data.keys().hasOnly(['name','points','start','end','reminder','createdAt','updatedAt'])
+          && request.resource.data.name is string && request.resource.data.name.size() <= 90
+          && request.resource.data.points is number && request.resource.data.points >= 0 && request.resource.data.points <= 10000;
+        allow delete: if parent(fid);
+      }
+      // Prayer marks are written exclusively by the verified Cloud Function,
+      // which uses the server clock and verified AlAdhan prayer windows.
+      match /prayerDays/{dayId} {
+        allow get,list: if member(fid);
+        allow create,update,delete: if false;
+      }
+      // Push events are client-writable only by authenticated family members.
+      // Production should add rate limiting and server-side event verification.
+      match /events/{eventId} {
+        allow get,list: if member(fid);
+        allow create: if member(fid)
+          && request.resource.data.keys().hasOnly(['actorId','type','body','createdAt'])
+          && request.resource.data.actorId == request.auth.uid
+          && request.resource.data.type in ['login','task','allowance','chat']
+          && request.resource.data.body is string && request.resource.data.body.size() <= 160;
+        allow update,delete: if false;
+      }
+    }
+    match /invites/{tokenHash} { allow read,write: if false; }
+  }
+}

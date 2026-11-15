@@ -1,0 +1,13 @@
+# Public release gate
+- [ ] New Firebase project and separate repository (no personal data)
+- [ ] Rules deployed and adversarial multi-account tests passed
+- [ ] Onboarding mother and children (invite redemption UI + server functions)
+- [ ] Tasks, rewards, parent approval, and chat migrated and tested
+- [ ] Prayer times API with source, method, time zone and adjustment settings
+- [ ] Server-side enforcement for cut-off times and points
+- [ ] Background push reminders scheduler, FCM messaging, invalid token cleanup
+- [ ] iOS Home Screen push and Android push tested
+- [ ] Child safety/privacy policy, parent consent, age checks and account deletion
+- [ ] Export/delete data, backup and recovery plan
+- [ ] App Store and Play Store policies and billing reviewed
+- [ ] Full Arabic / English UI tests, accessibility and rate limiting
