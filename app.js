@@ -11,8 +11,30 @@ const defaultFamily=()=>({name:'',fatherName:'',motherName:'',country:'KW',city:
 let auth,db,app,functions,me=null,fid=null,family=defaultFamily(),kids=[],tasks=[],preview=false,loginMode='register',currentView='home',activeTab='family',lang='ar';
 const PRAYERS=[['Fajr','الفجر'],['Dhuhr','الظهر'],['Asr','العصر'],['Maghrib','المغرب'],['Isha','العشاء']];
 let prayerPayload=null,prayerFetched=0,prayerBusy=false;
+const COUNTRY_NAMES={KW:'Kuwait',EG:'Egypt',SA:'Saudi Arabia',AE:'United Arab Emirates',QA:'Qatar',BH:'Bahrain',OM:'Oman',JO:'Jordan',US:'United States',GB:'United Kingdom',DE:'Germany',FR:'France'};
 const prayerFormat=t=>new Intl.DateTimeFormat(document.documentElement.lang==='en'?'en-GB':'ar-EG',{hour:'2-digit',minute:'2-digit',timeZone:prayerPayload?.timezone||'UTC'}).format(new Date(t));
-const prayerNow=()=>prayerPayload?Date.now()+prayerPayload.clockOffset:Date.now();
+const prayerNow=()=>Date.now(); // Spark demo only: device clock, NOT a trusted clock.
+const zoneParts=(date,zone)=>Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(date).filter(x=>x.type!=='literal').map(x=>[x.type,Number(x.value)]));
+const zoneDay=(date,zone)=>{const p=zoneParts(date,zone);return `${p.year}-${String(p.month).padStart(2,'0')}-${String(p.day).padStart(2,'0')}`};
+function localPrayerMs(day,hm,zone){
+ const parts=String(hm).match(/^(\d{1,2}):(\d{2})/);if(!parts)throw Error('صيغة التوقيت غير صالحة');
+ const [yy,mm,dd]=day.split('-').map(Number);const target=Date.UTC(yy,mm-1,dd,Number(parts[1]),Number(parts[2]));let guess=target;
+ for(let i=0;i<4;i++){const p=zoneParts(new Date(guess),zone);guess+=target-Date.UTC(p.year,p.month-1,p.day,p.hour,p.minute)}return guess;
+}
+function prayerDemoMarks(){try{return JSON.parse(localStorage.getItem(`nogoom-spark-marks-${fid||'preview'}`)||'{}')}catch{return {}}}
+function savePrayerDemoMark(day,kid,prayer){const all=prayerDemoMarks();all[day]??={};all[day][kid]??={};all[day][kid][prayer]={at:new Date().toISOString(),demo:true};localStorage.setItem(`nogoom-spark-marks-${fid||'preview'}`,JSON.stringify(all))}
+async function fetchPrayerDemo(){
+ const country=COUNTRY_NAMES[family.country];if(!country||!family.city?.trim())throw Error('حدد الدولة والمدينة في الإعدادات');
+ const method=String(family.prayerMethod||'9');const windowMinutes=Number(family.prayerWindow??30);
+ if(!Number.isInteger(windowMinutes)||windowMinutes<5||windowMinutes>180)throw Error('مهلة الصلاة من 5 إلى 180 دقيقة');
+ async function fetchDay(day){const [y,m,d]=day.split('-');const url=new URL(`https://api.aladhan.com/v1/timingsByCity/${d}-${m}-${y}`);url.searchParams.set('city',family.city.trim());url.searchParams.set('country',country);url.searchParams.set('method',method);
+  const res=await fetch(url,{signal:AbortSignal.timeout(12000),cache:'no-store'});if(!res.ok)throw Error('خدمة المواقيت غير متاحة مؤقتاً');const json=await res.json();if(json.code!==200||!json.data?.timings||!json.data?.meta?.timezone)throw Error('بيانات المواقيت غير مكتملة');return json.data;
+ }
+ let day=new Date().toISOString().slice(0,10),data=await fetchDay(day);let localDay=zoneDay(new Date(),data.meta.timezone);
+ if(localDay!==day){day=localDay;data=await fetchDay(day);localDay=zoneDay(new Date(),data.meta.timezone);if(localDay!==day)throw Error('تعذر التحقق من تاريخ المدينة')}
+ const zone=data.meta.timezone;const windows=PRAYERS.map(([key])=>{const startMs=localPrayerMs(day,data.timings[key],zone);return {key,startMs,endMs:startMs+windowMinutes*60000}});
+ const local=prayerDemoMarks();return {date:day,timezone:zone,windowMinutes,windows,marks:local[day]||{}};
+}
 const toast=msg=>{const e=$('toast');e.textContent=msg;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),3500)};
 const fail=e=>{$('error').hidden=false;$('error').textContent=typeof e==='string'?e:(e?.message||String(e));};
 const show=id=>{for(const k of ['welcome','authView','onboarding','app'])$(k).hidden=k!==id;};
@@ -33,23 +55,23 @@ function renderPrayerRows(){const rows=$('prayerRows');rows.replaceChildren();co
  const row=document.createElement('div');row.className='prayer-row';const content=document.createElement('div');
  const title=document.createElement('h3');title.textContent='صلاة '+label;const time=document.createElement('p');time.textContent=entry?`موعد الصلاة: ${prayerFormat(entry.startMs)} — الإغلاق: ${prayerFormat(entry.endMs)}`:'الموعد غير متاح';
  const state=document.createElement('span');state.className='prayer-status';state.textContent=done?'✅ تم تسجيل الصلاة':!entry?'🔒 تعذر تحميل الوقت':now<entry.startMs?'🔒 لم يحن وقتها':now>=entry.endMs?'🔒 انتهت المهلة':!profileId?'اختر الطفل أولاً':'🟢 متاح الآن';
- content.append(title,time,state);const btn=document.createElement('button');btn.type='button';btn.textContent=done?'✓ صليت':'صليت';btn.className='primary';btn.disabled=!open||!profileId||done||preview||!me||prayerBusy;
- btn.title=preview?'المعاينة لا تسجل صلاة':!open?'التسجيل متاح فقط أثناء مهلة الصلاة':'';
- btn.onclick=async()=>{if(!confirm('تأكيد أداء صلاة '+label+'؟'))return;btn.disabled=true;try{const call=httpsCallable(functions,'markPrayer',{timeout:30000});await call({childId:profileId,prayer:key});await loadPrayerStatus(true);toast('تم تسجيل الصلاة')}catch(e){fail(e);await loadPrayerStatus(true)}};
+ content.append(title,time,state);const btn=document.createElement('button');btn.type='button';btn.textContent=done?'✓ صليت':'صليت';btn.className='primary';btn.disabled=!open||!profileId||done||!me||prayerBusy;
+ btn.title=!open?'التسجيل التجريبي متاح فقط أثناء مهلة الصلاة':'تجربة محلية على هذا الجهاز فقط';
+ btn.onclick=()=>{if(!prayerPayload||!profileId)return;const w=prayerPayload.windows.find(w=>w.key===key);if(!w||Date.now()<w.startMs||Date.now()>=w.endMs){renderPrayerRows();return}if(!confirm('تسجيل تجريبي للصلاة على هذا الجهاز فقط؟'))return;savePrayerDemoMark(prayerPayload.date,profileId,key);prayerPayload.marks=prayerDemoMarks()[prayerPayload.date]||{};renderPrayerRows();toast('تم تسجيل اختبار محلي فقط — غير متزامن ولا يُحتسب كمكافأة')};
  row.append(content,btn);rows.append(row);
- }if(prayerPayload){$('prayerClock').textContent=`الوقت الحالي: ${prayerFormat(now)} • ${prayerPayload.date} • مهلة الصلاة ${prayerPayload.windowMinutes} دقيقة`;}
+ }if(prayerPayload){$('prayerClock').textContent=`تجربة Spark (ساعة الجهاز): ${prayerFormat(now)} • ${prayerPayload.date} • مهلة الصلاة ${prayerPayload.windowMinutes} دقيقة • التسجيل محلي وغير محمي من التلاعب`;}
 }
 async function loadPrayerStatus(force=false){renderPrayerChildOptions();$('prayerLocation').textContent=`المكان: ${family.city||'لم تحدد مدينة'} — ${family.country||''} • الأوقات حسب طريقة الحساب المختارة`;
- if(preview){prayerPayload=null;$('prayerClock').textContent='معاينة الإعدادات فقط. التسجيل غير متاح دون Firebase.';renderPrayerRows();return}
- if(!me||!functions){prayerPayload=null;$('prayerClock').textContent='سجّل الدخول لتحميل مواقيت الصلاة.';renderPrayerRows();return}
+ 
+ if(!me&&!preview){prayerPayload=null;$('prayerClock').textContent='سجّل الدخول لتحميل المواقيت.';renderPrayerRows();return}
  if(!force&&prayerPayload&&Date.now()-prayerFetched<90000){renderPrayerRows();return}
- if(prayerBusy)return;prayerBusy=true;$('prayerError').hidden=true;$('prayerClock').textContent='جاري تحديث المواقيت من الخادم…';renderPrayerRows();
- try{const call=httpsCallable(functions,'getPrayerWindows',{timeout:30000});const before=Date.now(),result=await call({});prayerPayload={...result.data,clockOffset:result.data.serverNow-Math.round((before+Date.now())/2)};prayerFetched=Date.now();}
- catch(e){prayerPayload=null;$('prayerError').hidden=false;$('prayerError').textContent='تعذر تحميل أوقات الصلاة: '+(e.message||e);$('prayerClock').textContent='🔒 جميع أزرار «صليت» مقفولة حتى تصل المواقيت الصحيحة.'}
+ if(prayerBusy)return;prayerBusy=true;$('prayerError').hidden=true;$('prayerClock').textContent='جاري تحميل المواقيت من AlAdhan (تجربة Spark)…';renderPrayerRows();
+ try{prayerPayload=await fetchPrayerDemo();prayerFetched=Date.now();}
+ catch(e){prayerPayload=null;$('prayerError').hidden=false;$('prayerError').textContent='تعذر تحميل أوقات الصلاة: '+(e.message||e);$('prayerClock').textContent='🔒 زر «صليت» مقفول لحين تحميل الأوقات الصحيحة. جرّب كتابة اسم المدينة بالإنجليزية مثل Kuwait City.'}
  finally{prayerBusy=false;renderPrayerRows()}}
 $('refreshPrayers').onclick=()=>loadPrayerStatus(true);
 $('prayerChild').onchange=()=>renderPrayerRows();
-setInterval(()=>{if(currentView==='prayer'&&!$('app').hidden){if(prayerPayload&&Date.now()-prayerFetched>90000)loadPrayerStatus(true);else renderPrayerRows()}},15000);
+setInterval(()=>{if(currentView==='prayer'&&!$('app').hidden){if(prayerPayload&&Date.now()-prayerFetched>300000)loadPrayerStatus(true);else renderPrayerRows()}},15000);
 const savePreview=()=>localStorage.setItem('nogoom-public-preview-v1',JSON.stringify({family,kids,tasks}));
 async function persistFamily(){if(preview){savePreview();return}await setDoc(doc(db,'families',fid),{...family,ownerId:fid,updatedAt:serverTimestamp()},{merge:true})}
 async function persistItem(name,value){if(preview){let list=name==='children'?kids:tasks;if(!value.id)value.id=crypto.randomUUID();const i=list.findIndex(x=>x.id===value.id);i<0?list.push(value):list.splice(i,1,value);savePreview();return}const {id,...record}=value;if(value.id)await setDoc(doc(db,'families',fid,name,value.id),{...record,updatedAt:serverTimestamp()},{merge:true});else{const ref=await addDoc(collection(db,'families',fid,name),{...record,createdAt:serverTimestamp()});value.id=ref.id}}
